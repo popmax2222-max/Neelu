@@ -256,6 +256,8 @@
   var STYLISTS = ['服部 真依'];
   /* 営業時間・予約枠の設定（分単位）: OPEN_MIN=開店 / CLOSE_MIN=最終終了 / SLOT_STEP=予約開始の刻み / CLOSED_DOW=定休日(0=日〜6=土) */
   var OPEN_MIN = 9*60, CLOSE_MIN = 18*60, SLOT_STEP = 90, CLOSED_DOW = 1; /* 9:00〜18:00 / 90分刻み / 月曜定休 */
+  /* スタッフ用「電話予約」で入れられる開始時刻の刻み（分）。お客様のネット予約(SLOT_STEP)とは別です。サーバー(Apps Script)のCONFIG.ADMIN_SLOT_STEPと同じにしてください */
+  var ADMIN_SLOT_STEP = 30;
   var DOW_JP = ['日','月','火','水','木','金','土'];
 
   /* ---------- helpers ---------- */
@@ -339,11 +341,12 @@
     return true;
   }
 
-  function computeSlots(dateStr, durationMin, requestedStylist, bookings){
+  function computeSlots(dateStr, durationMin, requestedStylist, bookings, step){
     var slots = [];
     var isToday = dateStr===ymd(todayDate());
     var nm = nowMinutes();
-    for(var t=OPEN_MIN; t+durationMin<=CLOSE_MIN; t+=SLOT_STEP){
+    step = step || SLOT_STEP;   /* 省略時はお客様用の刻み。スタッフ用の電話予約では ADMIN_SLOT_STEP を渡す */
+    for(var t=OPEN_MIN; t+durationMin<=CLOSE_MIN; t+=step){
       if(isToday && t<=nm) continue;
       var freeStylist = null;
       if(requestedStylist){
@@ -481,7 +484,7 @@
   /* One stylist's day as an ordered list of booked blocks and free gaps (gaps under 20 min are dropped). */
   function computeGaps(stylistName, dateStr, bookings){
     var start = OPEN_MIN;
-    if(dateStr===ymd(todayDate())) start = Math.max(start, Math.ceil(nowMinutes()/SLOT_STEP)*SLOT_STEP);
+    if(dateStr===ymd(todayDate())) start = Math.max(start, Math.ceil(nowMinutes()/ADMIN_SLOT_STEP)*ADMIN_SLOT_STEP);
     var mine = bookings.filter(function(b){ return b.date===dateStr && b.status!=='cancelled' && (STYLISTS.length===1 || b.stylist===stylistName); })
       .map(function(b){ return { s:toMin(b.time), e:toMin(b.endTime), b:b }; })
       .sort(function(a,b){ return a.s-b.s; });
@@ -494,10 +497,10 @@
     if(CLOSE_MIN-cur>=20) parts.push({ type:'free', s:cur, e:CLOSE_MIN });
     return parts;
   }
-  /* Bookable start times are on the 30-min grid, so a gap "fits" only if some grid time inside it leaves room for the menu. */
+  /* 電話予約の開始時刻は ADMIN_SLOT_STEP（30分）刻み。その刻みの時刻で、メニューが収まる隙間だけ「入る」とみなす。 */
   function gapFits(part, dur){
     if(!dur) return false;
-    var t = Math.ceil(part.s/SLOT_STEP)*SLOT_STEP;
+    var t = Math.ceil(part.s/ADMIN_SLOT_STEP)*ADMIN_SLOT_STEP;
     return t+dur<=part.e;
   }
 
@@ -538,7 +541,8 @@
       items: items.map(function(it){ return {id:it.id,name:it.name,price:it.price,duration:it.duration}; }),
       requestedStylist: m.assignedStylist,     /* the stylist whose gap the admin picked, never おまかせ */
       date: m.date,
-      time: m.time
+      time: m.time,
+      pin: state.adminPin                       /* スタッフのアクセスコード。付けるとサーバーが電話予約用の刻み(ADMIN_SLOT_STEP)で受け付ける */
     }).then(function(res){
       state.manual = newManual({ date:m.date, stylist:m.stylist, lastBooking:res.booking });   /* keep date/stylist for the next call */
       render();
@@ -552,6 +556,7 @@
         refreshManualBookings();
         return;
       }
+      if(err.code==='bad_pin'){ stopAdminWatch(); setState({ adminUnlocked:false, adminPin:'', view:'adminLogin', adminPinError:'アクセスコードが違います。もう一度ログインしてください' }); return; }
       showToast(errorMessage(err.code));
     });
   }
@@ -964,13 +969,13 @@
         });
         html += '</div></div>';
       });
-      html += '<p class="manual-note">'+(dur ? '緑色の空きは、選んだメニュー（'+dur+'分）が入る隙間です。' : 'メニューを選ぶと、入る隙間が緑色になります。')+'予約の開始は'+SLOT_STEP+'分刻み（'+minToHHMM(OPEN_MIN)+'、'+minToHHMM(OPEN_MIN+SLOT_STEP)+'、'+minToHHMM(OPEN_MIN+SLOT_STEP*2)+'…）です。</p>';
+      html += '<p class="manual-note">'+(dur ? '緑色の空きは、選んだメニュー（'+dur+'分）が入る隙間です。' : 'メニューを選ぶと、入る隙間が緑色になります。')+'電話予約の開始は'+ADMIN_SLOT_STEP+'分刻み（'+minToHHMM(OPEN_MIN)+'、'+minToHHMM(OPEN_MIN+ADMIN_SLOT_STEP)+'、'+minToHHMM(OPEN_MIN+ADMIN_SLOT_STEP*2)+'…）で入れられます（お客様のネット予約は'+SLOT_STEP+'分刻みです）。</p>';
 
       html += '<div class="section-title">④ 開始時間を選択</div>';
       if(!items.length){
         html += '<div class="empty-note">メニューを選ぶと、入る時間が表示されます</div>';
       } else {
-        var slots = computeSlots(m.date, dur, m.stylist, dayB);
+        var slots = computeSlots(m.date, dur, m.stylist, dayB, ADMIN_SLOT_STEP);
         if(slots.length===0){
           html += '<div class="empty-note">この日はご案内できる時間がありません</div>';
         } else {
