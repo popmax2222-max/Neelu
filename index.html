@@ -233,7 +233,7 @@
   ];
   var ALL_ITEMS = MENU.reduce(function(acc,g){ return acc.concat(g.items); }, []);
   var STYLISTS = ['田中 愛','佐藤 舞','鈴木 玲奈','山本 陸'];
-  var OPEN_MIN = 10*60, CLOSE_MIN = 19*60, SLOT_STEP = 30, CLOSED_DOW = 1; /* Monday */
+  var OPEN_MIN = 10*60, CLOSE_MIN = 19*60, SLOT_STEP = 90, CLOSED_DOW = 1; /* Monday */
   var DOW_JP = ['日','月','火','水','木','金','土'];
 
   /* ---------- helpers ---------- */
@@ -289,6 +289,15 @@
     adminFilter: 'today',       /* today | week | all */
     adminLoadError: false,
     adminTimer: null,
+    adminAddOpen: false,        /* 電話予約の手動追加フォームの開閉 */
+    adminNewSelected: {},       /* itemId -> true（手動追加フォームのメニュー選択） */
+    adminNewStylist: '',
+    adminNewDate: '',
+    adminNewTime: '',
+    adminNewName: '',
+    adminNewPhone: '',
+    adminNewNote: '',
+    adminAddSubmitting: false,
     toast: null,
     confirmCancelId: null       /* booking id pending cancel confirmation */
   };
@@ -723,6 +732,47 @@
     return html;
   }
 
+  function renderAdminAddForm(){
+    var html = '<div class="card">';
+    html += '<div class="section-title">電話予約を手動で追加</div>';
+    html += '<p class="faint" style="font-size:11.5px;margin-bottom:14px;">通常の予約枠に関わらず、自由な日時で登録できます。</p>';
+
+    html += '<div class="menu-group">';
+    MENU.forEach(function(group){
+      html += '<div style="margin-bottom:12px;"><div class="faint" style="font-size:11px;margin-bottom:6px;">'+esc(group.category)+'</div>';
+      group.items.forEach(function(it){
+        var on = !!state.adminNewSelected[it.id];
+        html += '<button class="menu-item'+(on?' selected':'')+'" style="padding:10px 14px;margin-bottom:6px;" data-action="admin-add-toggle-item" data-id="'+it.id+'">' +
+          '<span><span class="name" style="font-size:13px;">'+esc(it.name)+'</span><br><span class="meta">'+it.duration+'分 ・ '+fmtItemYen(it)+'</span></span>' +
+          '<span class="check-circle'+(on?' on':'')+'" style="width:22px;height:22px;">'+(on?icon('check',12):'')+'</span>' +
+        '</button>';
+      });
+      html += '</div>';
+    });
+    html += '</div>';
+
+    html += '<div class="field"><label>担当スタイリスト</label><div class="chips" style="margin-bottom:0;">';
+    html += '<button class="chip'+(state.adminNewStylist===''?' active':'')+'" data-action="admin-add-pick-stylist" data-name="">おまかせ</button>';
+    STYLISTS.forEach(function(s){
+      html += '<button class="chip'+(state.adminNewStylist===s?' active':'')+'" data-action="admin-add-pick-stylist" data-name="'+esc(s)+'">'+esc(s)+'</button>';
+    });
+    html += '</div></div>';
+
+    html += '<div class="field"><label>日付</label><input type="date" data-bind="adminNewDate" value="'+esc(state.adminNewDate)+'"></div>';
+    html += '<div class="field"><label>開始時刻</label><input type="time" data-bind="adminNewTime" value="'+esc(state.adminNewTime)+'"></div>';
+    html += '<div class="field required"><label>お名前</label><input type="text" data-bind="adminNewName" value="'+esc(state.adminNewName)+'" placeholder="山田 花子"></div>';
+    html += '<div class="field required"><label>電話番号</label><input type="tel" data-bind="adminNewPhone" value="'+esc(state.adminNewPhone)+'" placeholder="090-0000-0000"></div>';
+    html += '<div class="field"><label>備考</label><textarea data-bind="adminNewNote" placeholder="電話予約のメモなど">'+esc(state.adminNewNote)+'</textarea></div>';
+
+    html += '<div class="row-between" style="gap:10px;">' +
+      '<button class="btn btn-outline" style="flex:1;" data-action="admin-add-toggle">キャンセル</button>' +
+      '<button class="btn btn-primary" style="flex:1;" data-action="admin-add-submit" '+(state.adminAddSubmitting?'disabled':'')+'>'+(state.adminAddSubmitting?'登録中…':'この内容で登録する')+'</button>' +
+    '</div>';
+
+    html += '</div>';
+    return html;
+  }
+
   function renderAdmin(){
     var all = state.adminBookings;
     var todayStr = ymd(todayDate());
@@ -754,6 +804,12 @@
       '<button class="chip'+(state.adminFilter==='week'?' active':'')+'" data-action="admin-filter" data-filter="week">今週</button>' +
       '<button class="chip'+(state.adminFilter==='all'?' active':'')+'" data-action="admin-filter" data-filter="all">すべて</button>' +
     '</div>';
+
+    if(!state.adminAddOpen){
+      html += '<div style="margin-bottom:16px;"><button class="btn btn-outline" data-action="admin-add-toggle">＋ 電話予約を手動で追加</button></div>';
+    } else {
+      html += renderAdminAddForm();
+    }
 
     if(state.adminLoading){
       html += '<div class="empty-note">読み込み中…</div>';
@@ -921,6 +977,52 @@
       return;
     }
     if(action==='admin-filter'){ setState({ adminFilter: el.getAttribute('data-filter') }); return; }
+
+    if(action==='admin-add-toggle'){
+      if(state.adminAddOpen){
+        setState({ adminAddOpen:false });
+      } else {
+        setState({
+          adminAddOpen:true, adminNewSelected:{}, adminNewStylist:'',
+          adminNewDate: ymd(todayDate()), adminNewTime:'',
+          adminNewName:'', adminNewPhone:'', adminNewNote:''
+        });
+      }
+      return;
+    }
+    if(action==='admin-add-toggle-item'){
+      var addId = el.getAttribute('data-id');
+      var addSel = Object.assign({}, state.adminNewSelected);
+      if(addSel[addId]) delete addSel[addId]; else addSel[addId] = true;
+      setState({ adminNewSelected: addSel });
+      return;
+    }
+    if(action==='admin-add-pick-stylist'){ setState({ adminNewStylist: el.getAttribute('data-name') }); return; }
+    if(action==='admin-add-submit'){
+      var addItems = ALL_ITEMS.filter(function(it){ return state.adminNewSelected[it.id]; });
+      if(addItems.length===0){ showToast('メニューを選択してください'); return; }
+      if(!state.adminNewDate || !state.adminNewTime){ showToast('日付と時刻を入力してください'); return; }
+      if(!state.adminNewName.trim() || !state.adminNewPhone.trim()){ showToast('お名前と電話番号を入力してください'); return; }
+      setState({ adminAddSubmitting:true });
+      api('adminCreate', {
+        pin: state.adminPin,
+        name: state.adminNewName.trim(),
+        phone: state.adminNewPhone.trim(),
+        note: state.adminNewNote.trim(),
+        items: addItems.map(function(it){ return {id:it.id,name:it.name,price:it.price,duration:it.duration}; }),
+        stylist: state.adminNewStylist || 'おまかせ',
+        date: state.adminNewDate,
+        time: state.adminNewTime
+      }).then(function(){
+        showToast('予約を登録しました');
+        setState({ adminAddSubmitting:false, adminAddOpen:false });
+        loadAdminBookings();
+      }).catch(function(err){
+        setState({ adminAddSubmitting:false });
+        showToast(err.code==='slot_taken' ? 'その時間は担当スタイリストの予約が埋まっています' : errorMessage(err.code));
+      });
+      return;
+    }
   });
 
   root.addEventListener('change', function(e){
