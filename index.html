@@ -175,6 +175,26 @@
   .admin-filters{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
 
   .pin-box{max-width:320px;margin:60px auto;text-align:center;}
+
+  /* admin: manual (phone) booking */
+  .manual-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 28px;align-items:start;}
+  .manual-grid .menu-item{padding:10px 14px;margin-bottom:8px;}
+  .manual-grid .section-title{margin-top:6px;}
+  .manual-grid .chips{flex-wrap:wrap;overflow-x:visible;}
+  .manual-sub{font-size:12px;font-weight:700;color:var(--text-soft);margin:0 0 8px;}
+  .manual-note{font-size:11.5px;color:var(--text-faint);line-height:1.7;margin:8px 0 14px;}
+  .date-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;}
+  .date-row input[type=date]{padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg-elev);font-size:14px;}
+  .gap-card{padding:14px 16px;margin-bottom:10px;}
+  .gap-name{font-size:12.5px;font-weight:700;margin-bottom:8px;}
+  .pill-wrap{display:flex;flex-wrap:wrap;gap:6px;}
+  .pill{display:inline-block;padding:5px 10px;border-radius:8px;font-size:11.5px;white-space:nowrap;}
+  .pill-booked{background:var(--bg-soft2);color:var(--text-soft);}
+  .pill-free{background:var(--bg-elev);border:1px dashed var(--line);color:var(--text-faint);}
+  .pill-fit{background:var(--success-soft);border:1px solid var(--success);color:var(--success);font-weight:700;}
+  .slot small{display:block;font-size:10px;opacity:.75;margin-top:1px;}
+  .manual-result{background:var(--success-soft);border-color:var(--success);}
+  @media (max-width:820px){ .manual-grid{grid-template-columns:minmax(0,1fr);} }
   .footer-note{text-align:center;padding:26px 20px 40px;font-size:11px;color:var(--text-faint);}
   .footer-link{font-size:11px;color:var(--text-faint);text-decoration:underline;}
   @media (max-width:600px){ .field input, .field textarea{font-size:16px;} .topbar{padding:12px 14px;gap:10px;} .brand{font-size:22px;} .brand small{display:none;} .navlinks{flex-wrap:nowrap;gap:6px;} .navlink{padding:8px 11px;font-size:12px;} }
@@ -232,8 +252,10 @@
     ]}
   ];
   var ALL_ITEMS = MENU.reduce(function(acc,g){ return acc.concat(g.items); }, []);
-  var STYLISTS = ['田中 愛','佐藤 舞','鈴木 玲奈','山本 陸'];
-  var OPEN_MIN = 10*60, CLOSE_MIN = 19*60, SLOT_STEP = 90, CLOSED_DOW = 1; /* Monday */
+  /* 担当者（現在は1名のみ。画面には担当者の選択欄を出さず、予約内容・通知メール・スタッフ画面の記録用に使います。サーバー(Apps Script)のCONFIG.STYLISTSと同じにしてください） */
+  var STYLISTS = ['服部 真依'];
+  /* 営業時間・予約枠の設定（分単位）: OPEN_MIN=開店 / CLOSE_MIN=最終終了 / SLOT_STEP=予約開始の刻み / CLOSED_DOW=定休日(0=日〜6=土) */
+  var OPEN_MIN = 9*60, CLOSE_MIN = 18*60, SLOT_STEP = 90, CLOSED_DOW = 1; /* 9:00〜18:00 / 90分刻み / 月曜定休 */
   var DOW_JP = ['日','月','火','水','木','金','土'];
 
   /* ---------- helpers ---------- */
@@ -289,16 +311,8 @@
     adminFilter: 'today',       /* today | week | all */
     adminLoadError: false,
     adminTimer: null,
-    adminAddOpen: false,        /* 電話予約の手動追加フォームの開閉 */
-    adminNewSelected: {},       /* itemId -> true（手動追加フォームのメニュー選択） */
-    adminNewStylist: '',
-    adminNewDate: '',
-    adminNewTime: '',
-    adminNewName: '',
-    adminNewPhone: '',
-    adminNewNote: '',
-    adminAddSubmitting: false,
     toast: null,
+    manual: null,               /* admin manual (phone) booking form; see newManual() */
     confirmCancelId: null       /* booking id pending cancel confirmation */
   };
 
@@ -317,7 +331,7 @@
     for(var i=0;i<bookings.length;i++){
       var b = bookings[i];
       if(b.status==='cancelled') continue;
-      if(b.stylist!==stylistName) continue;
+      if(STYLISTS.length>1 && b.stylist!==stylistName) continue;   /* 担当者が1名のときは、名前に関係なくすべての予約を重複とみなす */
       var bs = parseInt(b.time.split(':')[0],10)*60+parseInt(b.time.split(':')[1],10);
       var be = parseInt(b.endTime.split(':')[0],10)*60+parseInt(b.endTime.split(':')[1],10);
       if(overlap(startMin,endMin,bs,be)) return false;
@@ -449,6 +463,99 @@
   }
   function stopAdminWatch(){ if(state.adminTimer){ clearInterval(state.adminTimer); state.adminTimer=null; } }
 
+  /* ---------- admin: manual (phone) booking ---------- */
+  function newManual(keep){
+    return Object.assign({
+      selected:{}, stylist:'', date:'', dateError:'', time:null, assignedStylist:null,
+      name:'', phone:'', note:'',
+      loading:false, loadError:false, submitting:false, lastBooking:null
+    }, keep || {});
+  }
+  function setManual(patch){ state.manual = Object.assign({}, state.manual || newManual(), patch); render(); }
+  function manualItems(){ var m = state.manual; return ALL_ITEMS.filter(function(it){ return m && m.selected[it.id]; }); }
+  function manualDuration(){ return manualItems().reduce(function(s,it){ return s+it.duration; }, 0); }
+  function manualPrice(){ return manualItems().reduce(function(s,it){ return s+it.price; }, 0); }
+  function toMin(hhmm){ var p = String(hhmm).split(':'); return parseInt(p[0],10)*60 + parseInt(p[1],10); }
+  function sortBookings(list){ return list.slice().sort(function(a,b){ var ka=a.date+a.time, kb=b.date+b.time; return ka<kb?-1:(ka>kb?1:0); }); }
+
+  /* One stylist's day as an ordered list of booked blocks and free gaps (gaps under 20 min are dropped). */
+  function computeGaps(stylistName, dateStr, bookings){
+    var start = OPEN_MIN;
+    if(dateStr===ymd(todayDate())) start = Math.max(start, Math.ceil(nowMinutes()/SLOT_STEP)*SLOT_STEP);
+    var mine = bookings.filter(function(b){ return b.date===dateStr && b.status!=='cancelled' && (STYLISTS.length===1 || b.stylist===stylistName); })
+      .map(function(b){ return { s:toMin(b.time), e:toMin(b.endTime), b:b }; })
+      .sort(function(a,b){ return a.s-b.s; });
+    var parts = [], cur = start;
+    mine.forEach(function(x){
+      if(x.s-cur>=20) parts.push({ type:'free', s:cur, e:x.s });
+      parts.push({ type:'booked', s:x.s, e:x.e, b:x.b });
+      cur = Math.max(cur, x.e);
+    });
+    if(CLOSE_MIN-cur>=20) parts.push({ type:'free', s:cur, e:CLOSE_MIN });
+    return parts;
+  }
+  /* Bookable start times are on the 30-min grid, so a gap "fits" only if some grid time inside it leaves room for the menu. */
+  function gapFits(part, dur){
+    if(!dur) return false;
+    var t = Math.ceil(part.s/SLOT_STEP)*SLOT_STEP;
+    return t+dur<=part.e;
+  }
+
+  function refreshManualBookings(){
+    setManual({ loading:true, loadError:false });
+    return api('adminList', { pin: state.adminPin }).then(function(res){
+      state.adminBookings = sortBookings(res.bookings || []);
+      setManual({ loading:false, loadError:false });
+    }).catch(function(err){
+      if(err.code==='bad_pin'){ stopAdminWatch(); setState({ adminUnlocked:false, adminPin:'', view:'adminLogin', adminPinError:'アクセスコードが違います' }); return; }
+      setManual({ loading:false, loadError:true });
+    });
+  }
+
+  function loadManualDate(dateStr){
+    var err = '';
+    if(dateStr){
+      var d = parseYmd(dateStr);
+      if(d < todayDate()) err = 'すでに過ぎた日です';
+      else if(d.getDay()===CLOSED_DOW) err = '定休日（月曜）です';
+    }
+    setManual({ date:dateStr, dateError:err, time:null, assignedStylist:null });
+    if(dateStr && !err) refreshManualBookings();
+  }
+
+  function submitManualBooking(){
+    var m = state.manual;
+    if(!m || m.submitting) return;
+    var items = manualItems();
+    if(!items.length || !m.date || !m.time || !m.assignedStylist){ showToast('メニューと日時を選んでください'); return; }
+    if(!m.name.trim() || !m.phone.trim()){ showToast('お名前と電話番号を入力してください'); return; }
+    setManual({ submitting:true });
+    var note = '【電話予約】' + (m.note.trim() ? ' ' + m.note.trim() : '');
+    api('create', {
+      name: m.name.trim(),
+      phone: m.phone.trim(),
+      note: note,
+      items: items.map(function(it){ return {id:it.id,name:it.name,price:it.price,duration:it.duration}; }),
+      requestedStylist: m.assignedStylist,     /* the stylist whose gap the admin picked, never おまかせ */
+      date: m.date,
+      time: m.time
+    }).then(function(res){
+      state.manual = newManual({ date:m.date, stylist:m.stylist, lastBooking:res.booking });   /* keep date/stylist for the next call */
+      render();
+      window.scrollTo(0,0);
+      refreshManualBookings();
+    }).catch(function(err){
+      setManual({ submitting:false });
+      if(err.code==='slot_taken'){
+        showToast('その時間は直前に埋まってしまいました。別の時間を選んでください');
+        setManual({ time:null, assignedStylist:null });
+        refreshManualBookings();
+        return;
+      }
+      showToast(errorMessage(err.code));
+    });
+  }
+
   /* ---------- navigation ---------- */
   function goto(view){
     if(state.view==='admin' && view!=='admin') stopAdminWatch();
@@ -470,7 +577,7 @@
   }
 
   function renderFooter(){
-    if(state.view==='admin' || state.view==='adminLogin') return '';
+    if(state.view==='admin' || state.view==='adminLogin' || state.view==='adminManual') return '';
     return '<div class="footer-note">Neelu — Color Salon &nbsp;·&nbsp; <button class="footer-link" data-action="goto" data-view="adminLogin">スタッフ用</button></div>';
   }
 
@@ -527,14 +634,7 @@
     var html = '<div class="wrap-narrow">';
     html += stepper('calendar');
     html += '<h2 class="page-title">日時を選択</h2>';
-    html += '<p class="page-sub">担当スタイリストと日時をお選びください</p>';
-
-    html += '<div class="section-title">担当スタイリスト</div><div class="chips">';
-    html += '<button class="chip'+(state.stylist===''?' active':'')+'" data-action="pick-stylist" data-name="">おまかせ</button>';
-    STYLISTS.forEach(function(s){
-      html += '<button class="chip'+(state.stylist===s?' active':'')+'" data-action="pick-stylist" data-name="'+esc(s)+'">'+esc(s)+'</button>';
-    });
-    html += '</div>';
+    html += '<p class="page-sub">ご希望の日時をお選びください</p>';
 
     var mDate = monthMeta(state.monthOffset);
     var y = mDate.getFullYear(), m = mDate.getMonth();
@@ -612,17 +712,10 @@
     html += '<h2 class="page-title">予約内容の確認</h2>';
     html += '<p class="page-sub">お客様情報をご入力のうえ、ご確認ください</p>';
 
-    var stylistLabel = state.stylist ? state.stylist : 'おまかせ（担当は自動でお選びします）';
-
     html += '<div class="card">' +
       '<div class="faint" style="font-size:11px;margin-bottom:4px;">ご予約日時</div>' +
       '<div style="font-weight:700;font-size:15px;">'+fmtDateLabel(state.date)+'</div>' +
       '<div class="muted" style="margin-top:2px;">'+state.time+' 〜 '+addMinutes(state.time,totalDuration())+'</div>' +
-    '</div>';
-
-    html += '<div class="card">' +
-      '<div class="faint" style="font-size:11px;margin-bottom:4px;">担当スタイリスト</div>' +
-      '<div style="font-weight:700;font-size:15px;">'+esc(stylistLabel)+'</div>' +
     '</div>';
 
     html += '<div class="card"><div class="faint" style="font-size:11px;margin-bottom:10px;">選択したメニュー</div>';
@@ -658,7 +751,6 @@
     html += '<p class="page-sub" style="text-align:center;">ご来店を心よりお待ちしております</p>';
     html += '<div class="card">' +
       '<div class="row-between" style="margin-bottom:10px;"><span class="faint">日時</span><span style="font-weight:700;">'+fmtDateLabel(b.date)+' '+b.time+'〜</span></div>' +
-      '<div class="row-between" style="margin-bottom:10px;"><span class="faint">担当</span><span style="font-weight:700;">'+esc(b.stylist)+'</span></div>' +
       '<div class="row-between" style="margin-bottom:10px;"><span class="faint">メニュー</span><span style="font-weight:700;text-align:right;">'+b.items.map(function(it){return esc(it.name);}).join('、')+'</span></div>' +
       '<div class="row-between"><span class="faint">お支払い金額目安</span><span style="font-weight:700;color:var(--accent-dark);">'+fmtYen(b.totalPrice)+'</span></div>' +
     '</div>';
@@ -675,8 +767,7 @@
     var badgeLabel = b.status==='cancelled' ? 'キャンセル済み' : (b.status==='completed' ? '来店済み' : '予約確定');
     var html = '<div class="card">' +
       '<div class="row-between" style="margin-bottom:10px;">' +
-        '<div><div style="font-weight:700;font-size:14px;">'+fmtDateShort(b.date)+' '+b.time+'〜</div>' +
-        '<div class="muted" style="font-size:12px;margin-top:2px;">'+esc(b.stylist)+'</div></div>' +
+        '<div><div style="font-weight:700;font-size:14px;">'+fmtDateShort(b.date)+' '+b.time+'〜</div></div>' +
         '<span class="badge '+badgeClass+'">'+badgeLabel+'</span>' +
       '</div>' +
       '<div class="muted" style="font-size:13px;padding:10px 12px;background:var(--bg-soft);border-radius:10px;">'+b.items.map(function(it){return esc(it.name);}).join('、')+' ・ '+fmtYen(b.totalPrice)+'</div>';
@@ -732,47 +823,6 @@
     return html;
   }
 
-  function renderAdminAddForm(){
-    var html = '<div class="card">';
-    html += '<div class="section-title">電話予約を手動で追加</div>';
-    html += '<p class="faint" style="font-size:11.5px;margin-bottom:14px;">通常の予約枠に関わらず、自由な日時で登録できます。</p>';
-
-    html += '<div class="menu-group">';
-    MENU.forEach(function(group){
-      html += '<div style="margin-bottom:12px;"><div class="faint" style="font-size:11px;margin-bottom:6px;">'+esc(group.category)+'</div>';
-      group.items.forEach(function(it){
-        var on = !!state.adminNewSelected[it.id];
-        html += '<button class="menu-item'+(on?' selected':'')+'" style="padding:10px 14px;margin-bottom:6px;" data-action="admin-add-toggle-item" data-id="'+it.id+'">' +
-          '<span><span class="name" style="font-size:13px;">'+esc(it.name)+'</span><br><span class="meta">'+it.duration+'分 ・ '+fmtItemYen(it)+'</span></span>' +
-          '<span class="check-circle'+(on?' on':'')+'" style="width:22px;height:22px;">'+(on?icon('check',12):'')+'</span>' +
-        '</button>';
-      });
-      html += '</div>';
-    });
-    html += '</div>';
-
-    html += '<div class="field"><label>担当スタイリスト</label><div class="chips" style="margin-bottom:0;">';
-    html += '<button class="chip'+(state.adminNewStylist===''?' active':'')+'" data-action="admin-add-pick-stylist" data-name="">おまかせ</button>';
-    STYLISTS.forEach(function(s){
-      html += '<button class="chip'+(state.adminNewStylist===s?' active':'')+'" data-action="admin-add-pick-stylist" data-name="'+esc(s)+'">'+esc(s)+'</button>';
-    });
-    html += '</div></div>';
-
-    html += '<div class="field"><label>日付</label><input type="date" data-bind="adminNewDate" value="'+esc(state.adminNewDate)+'"></div>';
-    html += '<div class="field"><label>開始時刻</label><input type="time" data-bind="adminNewTime" value="'+esc(state.adminNewTime)+'"></div>';
-    html += '<div class="field required"><label>お名前</label><input type="text" data-bind="adminNewName" value="'+esc(state.adminNewName)+'" placeholder="山田 花子"></div>';
-    html += '<div class="field required"><label>電話番号</label><input type="tel" data-bind="adminNewPhone" value="'+esc(state.adminNewPhone)+'" placeholder="090-0000-0000"></div>';
-    html += '<div class="field"><label>備考</label><textarea data-bind="adminNewNote" placeholder="電話予約のメモなど">'+esc(state.adminNewNote)+'</textarea></div>';
-
-    html += '<div class="row-between" style="gap:10px;">' +
-      '<button class="btn btn-outline" style="flex:1;" data-action="admin-add-toggle">キャンセル</button>' +
-      '<button class="btn btn-primary" style="flex:1;" data-action="admin-add-submit" '+(state.adminAddSubmitting?'disabled':'')+'>'+(state.adminAddSubmitting?'登録中…':'この内容で登録する')+'</button>' +
-    '</div>';
-
-    html += '</div>';
-    return html;
-  }
-
   function renderAdmin(){
     var all = state.adminBookings;
     var todayStr = ymd(todayDate());
@@ -790,7 +840,10 @@
     var html = '<div class="wrap-wide">';
     html += '<div class="row-between" style="margin-bottom:20px;flex-wrap:wrap;gap:12px;">' +
       '<h2 class="page-title" style="margin:0;">予約管理ダッシュボード</h2>' +
-      '<button class="btn-ghost" data-action="admin-logout">ログアウト</button>' +
+      '<div style="display:flex;align-items:center;gap:14px;">' +
+        '<button class="btn btn-primary" style="padding:10px 18px;font-size:13.5px;" data-action="admin-manual-open">＋ 電話予約を登録</button>' +
+        '<button class="btn-ghost" data-action="admin-logout">ログアウト</button>' +
+      '</div>' +
     '</div>';
 
     html += '<div class="stat-row">' +
@@ -805,12 +858,6 @@
       '<button class="chip'+(state.adminFilter==='all'?' active':'')+'" data-action="admin-filter" data-filter="all">すべて</button>' +
     '</div>';
 
-    if(!state.adminAddOpen){
-      html += '<div style="margin-bottom:16px;"><button class="btn btn-outline" data-action="admin-add-toggle">＋ 電話予約を手動で追加</button></div>';
-    } else {
-      html += renderAdminAddForm();
-    }
-
     if(state.adminLoading){
       html += '<div class="empty-note">読み込み中…</div>';
     } else if(state.adminLoadError && all.length===0){
@@ -819,7 +866,7 @@
       html += '<div class="empty-note">該当する予約がありません。</div>';
     } else {
       html += '<div class="card" style="padding:0;overflow-x:auto;"><table class="admin-table"><thead><tr>' +
-        '<th>日付</th><th>時間</th><th>お客様</th><th>メニュー</th><th>担当</th><th>金額</th><th>状態</th><th></th>' +
+        '<th>日付</th><th>時間</th><th>お客様</th><th>メニュー</th><th>金額</th><th>状態</th><th></th>' +
       '</tr></thead><tbody>';
       filtered.forEach(function(b){
         var badgeClass = b.status==='cancelled' ? 'badge-cancelled' : (b.status==='completed' ? 'badge-completed' : 'badge-confirmed');
@@ -829,7 +876,6 @@
           '<td>'+b.time+'〜'+b.endTime+'</td>' +
           '<td>'+esc(b.name)+'<br><span class="faint" style="font-size:11px;">'+esc(b.phone)+'</span></td>' +
           '<td>'+b.items.map(function(it){return esc(it.name);}).join('、')+(b.note?'<br><span class="faint" style="font-size:11px;">備考: '+esc(b.note)+'</span>':'')+'</td>' +
-          '<td>'+esc(b.stylist)+'</td>' +
           '<td>'+fmtYen(b.totalPrice)+'</td>' +
           '<td><span class="badge '+badgeClass+'">'+badgeLabel+'</span></td>' +
           '<td>' + (b.status==='confirmed'
@@ -846,6 +892,119 @@
     return html;
   }
 
+  function renderAdminManual(){
+    var m = state.manual || (state.manual = newManual());
+    var items = manualItems();
+    var dur = manualDuration();
+    var dateOk = !!m.date && !m.dateError;
+    var dayB = dateOk ? state.adminBookings.filter(function(b){ return b.date===m.date; }) : [];
+    var shortName = function(s){ return s.split(/[\s　]+/)[0]; };
+
+    var html = '<div class="wrap-wide">';
+    html += '<div class="row-between" style="margin-bottom:6px;flex-wrap:wrap;gap:12px;">' +
+      '<h2 class="page-title" style="margin:0;">電話予約を登録</h2>' +
+      '<button class="btn-ghost" data-action="admin-manual-back">'+icon('back',13)+' ダッシュボードに戻る</button>' +
+    '</div>';
+    html += '<p class="page-sub">お電話でご予約のお客様を、空き時間に入れます</p>';
+
+    if(m.lastBooking){
+      var lb = m.lastBooking;
+      html += '<div class="card manual-result"><div style="font-weight:700;margin-bottom:4px;color:var(--success);">電話予約を登録しました</div>' +
+        '<div style="font-size:13px;">'+fmtDateLabel(lb.date)+' '+esc(lb.time)+'〜'+(lb.endTime?esc(lb.endTime):'')+' ／ '+esc(lb.name)+' 様</div></div>';
+    }
+
+    html += '<div class="manual-grid">';
+
+    /* left column: menu, stylist, date */
+    html += '<div>';
+    html += '<div class="section-title">① メニュー（複数選択可）</div>';
+    MENU.forEach(function(group){
+      html += '<div class="manual-sub">'+esc(group.category)+'</div>';
+      group.items.forEach(function(it){
+        var on = !!m.selected[it.id];
+        html += '<button class="menu-item'+(on?' selected':'')+'" data-action="manual-toggle-item" data-id="'+it.id+'">' +
+          '<span><span class="name">'+esc(it.name)+'</span><br><span class="meta">'+it.duration+'分 ・ '+fmtItemYen(it)+'</span></span>' +
+          '<span class="check-circle'+(on?' on':'')+'">'+(on?icon('check',14):'')+'</span>' +
+        '</button>';
+      });
+    });
+
+    html += '<div class="section-title" style="margin-top:18px;">② 日付</div>';
+    html += '<div class="date-row">' +
+      '<input type="date" id="manual-date" value="'+esc(m.date)+'" min="'+ymd(todayDate())+'">' +
+      '<button class="chip" data-action="manual-quick-date" data-offset="0">今日</button>' +
+      '<button class="chip" data-action="manual-quick-date" data-offset="1">明日</button>' +
+    '</div>';
+    if(m.dateError) html += '<p style="color:var(--danger);font-size:12px;margin-bottom:8px;">'+esc(m.dateError)+'</p>';
+    html += '</div>';
+
+    /* right column: gaps, slots, customer, submit */
+    html += '<div>';
+    html += '<div class="section-title">③ '+(dateOk ? fmtDateLabel(m.date)+'の予約状況（空き＝隙間）' : '予約状況（空き＝隙間）')+'</div>';
+    if(!m.date){
+      html += '<div class="empty-note">日付を選ぶと、スタイリストごとの空きが表示されます</div>';
+    } else if(m.dateError){
+      html += '<div class="empty-note">別の日付を選んでください</div>';
+    } else if(m.loading){
+      html += '<div class="empty-note">最新の予約を確認しています…</div>';
+    } else if(m.loadError){
+      html += '<div class="empty-note">予約データを取得できませんでした。<br>通信状況をご確認のうえ、日付をもう一度選んでください。</div>';
+    } else {
+      STYLISTS.forEach(function(name){
+        var parts = computeGaps(name, m.date, dayB);
+        html += '<div class="card gap-card">'+(STYLISTS.length>1 ? '<div class="gap-name">'+esc(name)+'</div>' : '')+'<div class="pill-wrap">';
+        if(parts.length===0) html += '<span class="pill pill-free">本日はご案内できる時間がありません</span>';
+        parts.forEach(function(p){
+          if(p.type==='booked'){
+            html += '<span class="pill pill-booked">'+minToHHMM(p.s)+'–'+minToHHMM(p.e)+' '+esc(p.b.name)+'</span>';
+          } else {
+            var fit = gapFits(p, dur);
+            html += '<span class="pill '+(fit?'pill-fit':'pill-free')+'">空き '+minToHHMM(p.s)+'–'+minToHHMM(p.e)+'（'+(p.e-p.s)+'分）</span>';
+          }
+        });
+        html += '</div></div>';
+      });
+      html += '<p class="manual-note">'+(dur ? '緑色の空きは、選んだメニュー（'+dur+'分）が入る隙間です。' : 'メニューを選ぶと、入る隙間が緑色になります。')+'予約の開始は'+SLOT_STEP+'分刻み（'+minToHHMM(OPEN_MIN)+'、'+minToHHMM(OPEN_MIN+SLOT_STEP)+'、'+minToHHMM(OPEN_MIN+SLOT_STEP*2)+'…）です。</p>';
+
+      html += '<div class="section-title">④ 開始時間を選択</div>';
+      if(!items.length){
+        html += '<div class="empty-note">メニューを選ぶと、入る時間が表示されます</div>';
+      } else {
+        var slots = computeSlots(m.date, dur, m.stylist, dayB);
+        if(slots.length===0){
+          html += '<div class="empty-note">この日はご案内できる時間がありません</div>';
+        } else {
+          if(!slots.some(function(s){ return s.available; })) html += '<div class="empty-note" style="padding:0 0 12px;">この条件で入る空きがありません。別の日やスタイリストをお試しください。</div>';
+          html += '<div class="slot-grid" style="margin-bottom:18px;">';
+          slots.forEach(function(s){
+            var cls = 'slot';
+            if(!s.available) cls += ' disabled';
+            else if(m.time===s.label) cls += ' selected';
+            var lbl = s.label + ((s.available && STYLISTS.length>1 && !m.stylist && s.stylist) ? '<small>'+esc(shortName(s.stylist))+'</small>' : '');
+            html += '<button class="'+cls+'" '+(s.available?'data-action="manual-pick-time" data-time="'+s.label+'" data-stylist="'+esc(s.stylist||'')+'"':'disabled')+'>'+lbl+'</button>';
+          });
+          html += '</div>';
+        }
+      }
+    }
+
+    html += '<div class="section-title">⑤ お客様情報</div>';
+    html += '<div class="field required"><label>お名前</label><input type="text" data-mbind="name" value="'+esc(m.name)+'" placeholder="山田 花子"></div>';
+    html += '<div class="field required"><label>電話番号</label><input type="tel" data-mbind="phone" value="'+esc(m.phone)+'" placeholder="090-0000-0000"></div>';
+    html += '<div class="field"><label>備考（任意・「【電話予約】」が自動で付きます）</label><textarea data-mbind="note" placeholder="例：前回と同じ色で">'+esc(m.note)+'</textarea></div>';
+
+    if(m.time && m.assignedStylist){
+      html += '<div class="card"><div class="faint" style="font-size:11px;margin-bottom:4px;">登録内容</div>' +
+        '<div style="font-weight:700;font-size:14px;">'+fmtDateLabel(m.date)+' '+m.time+' 〜 '+addMinutes(m.time,dur)+'</div>' +
+        '<div class="muted" style="font-size:13px;margin-top:2px;">'+items.map(function(it){return esc(it.name);}).join('、')+' ／ '+fmtYen(manualPrice())+'</div></div>';
+    }
+    html += '<button class="btn btn-primary btn-block" data-action="manual-submit" '+((m.submitting||!m.time)?'disabled':'')+'>'+(m.submitting?'登録中…':'この内容で電話予約を登録する')+'</button>';
+    html += '</div>';
+
+    html += '</div></div>';
+    return html;
+  }
+
   /* ---------- main render ---------- */
   var root = document.getElementById('app');
   function render(){
@@ -857,6 +1016,7 @@
     else if(state.view==='mypage') body = renderMyPage();
     else if(state.view==='adminLogin') body = renderAdminLogin();
     else if(state.view==='admin') body = state.adminUnlocked ? renderAdmin() : renderAdminLogin();
+    else if(state.view==='adminManual') body = state.adminUnlocked ? renderAdminManual() : renderAdminLogin();
     else body = renderMenu();
 
     var html = '';
@@ -973,65 +1133,43 @@
     }
     if(action==='admin-logout'){
       stopAdminWatch();
-      setState({ adminUnlocked:false, adminPin:'', adminBookings:[], view:'menu' });
+      setState({ adminUnlocked:false, adminPin:'', adminBookings:[], manual:null, view:'menu' });
       return;
     }
     if(action==='admin-filter'){ setState({ adminFilter: el.getAttribute('data-filter') }); return; }
 
-    if(action==='admin-add-toggle'){
-      if(state.adminAddOpen){
-        setState({ adminAddOpen:false });
-      } else {
-        setState({
-          adminAddOpen:true, adminNewSelected:{}, adminNewStylist:'',
-          adminNewDate: ymd(todayDate()), adminNewTime:'',
-          adminNewName:'', adminNewPhone:'', adminNewNote:''
-        });
-      }
+    /* admin: manual (phone) booking */
+    if(action==='admin-manual-open'){ state.manual = newManual(); goto('adminManual'); refreshManualBookings(); return; }
+    if(action==='admin-manual-back'){ goto('admin'); return; }
+    if(action==='manual-toggle-item'){
+      var mid = el.getAttribute('data-id');
+      var msel = Object.assign({}, state.manual.selected);
+      if(msel[mid]) delete msel[mid]; else msel[mid] = true;
+      setManual({ selected: msel, time:null, assignedStylist:null });
       return;
     }
-    if(action==='admin-add-toggle-item'){
-      var addId = el.getAttribute('data-id');
-      var addSel = Object.assign({}, state.adminNewSelected);
-      if(addSel[addId]) delete addSel[addId]; else addSel[addId] = true;
-      setState({ adminNewSelected: addSel });
+    if(action==='manual-pick-stylist'){ setManual({ stylist: el.getAttribute('data-name'), time:null, assignedStylist:null }); return; }
+    if(action==='manual-quick-date'){
+      var qd = todayDate(); qd.setDate(qd.getDate()+parseInt(el.getAttribute('data-offset'),10));
+      loadManualDate(ymd(qd));
       return;
     }
-    if(action==='admin-add-pick-stylist'){ setState({ adminNewStylist: el.getAttribute('data-name') }); return; }
-    if(action==='admin-add-submit'){
-      var addItems = ALL_ITEMS.filter(function(it){ return state.adminNewSelected[it.id]; });
-      if(addItems.length===0){ showToast('メニューを選択してください'); return; }
-      if(!state.adminNewDate || !state.adminNewTime){ showToast('日付と時刻を入力してください'); return; }
-      if(!state.adminNewName.trim() || !state.adminNewPhone.trim()){ showToast('お名前と電話番号を入力してください'); return; }
-      setState({ adminAddSubmitting:true });
-      api('adminCreate', {
-        pin: state.adminPin,
-        name: state.adminNewName.trim(),
-        phone: state.adminNewPhone.trim(),
-        note: state.adminNewNote.trim(),
-        items: addItems.map(function(it){ return {id:it.id,name:it.name,price:it.price,duration:it.duration}; }),
-        stylist: state.adminNewStylist || 'おまかせ',
-        date: state.adminNewDate,
-        time: state.adminNewTime
-      }).then(function(){
-        showToast('予約を登録しました');
-        setState({ adminAddSubmitting:false, adminAddOpen:false });
-        loadAdminBookings();
-      }).catch(function(err){
-        setState({ adminAddSubmitting:false });
-        showToast(err.code==='slot_taken' ? 'その時間は担当スタイリストの予約が埋まっています' : errorMessage(err.code));
-      });
-      return;
-    }
+    if(action==='manual-pick-time'){ setManual({ time: el.getAttribute('data-time'), assignedStylist: el.getAttribute('data-stylist')||null }); return; }
+    if(action==='manual-submit'){ submitManualBooking(); return; }
   });
 
   root.addEventListener('change', function(e){
     var bind = e.target.getAttribute && e.target.getAttribute('data-bind');
     if(bind){ state[bind] = e.target.value; }
+    var mbind = e.target.getAttribute && e.target.getAttribute('data-mbind');
+    if(mbind && state.manual){ state.manual[mbind] = e.target.value; }
+    if(e.target.id==='manual-date'){ loadManualDate(e.target.value); }
   });
   root.addEventListener('input', function(e){
     var bind = e.target.getAttribute && e.target.getAttribute('data-bind');
     if(bind){ state[bind] = e.target.value; }
+    var mbind = e.target.getAttribute && e.target.getAttribute('data-mbind');
+    if(mbind && state.manual){ state.manual[mbind] = e.target.value; }
     if(e.target.id==='lookup-phone-input'){ state.lookupPhone = e.target.value; }
     if(e.target.id==='admin-pin-input'){ state.adminPinInput = e.target.value; }
   });
