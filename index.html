@@ -155,6 +155,19 @@
   .badge-completed{background:var(--success-soft);color:var(--success);}
   .badge-cancelled{background:var(--bg-soft);color:var(--text-faint);}
 
+  /* 顧客カルテ: 施術写真 */
+  .photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .photo-cell{display:flex;flex-direction:column;gap:4px;text-align:left;padding:0;min-width:0;}
+  .photo-img{display:flex;align-items:center;justify-content:center;aspect-ratio:1/1;width:100%;border-radius:10px;overflow:hidden;background:var(--bg-soft);border:1px solid var(--line);font-size:11px;color:var(--text-faint);}
+  .photo-img img{width:100%;height:100%;object-fit:cover;display:block;}
+  .photo-date{font-size:11px;color:var(--text-soft);}
+  .photo-add{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border-radius:12px;font-size:13px;font-weight:700;background:var(--bg-elev);border:1px solid var(--accent);color:var(--accent-dark);cursor:pointer;}
+  .photo-viewer{position:fixed;inset:0;z-index:100;background:rgba(24,16,12,0.94);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;gap:14px;}
+  .photo-viewer img{max-width:100%;max-height:72vh;border-radius:8px;object-fit:contain;}
+  .photo-viewer .pv-date{color:#f3e8da;font-size:13px;}
+  .photo-viewer .pv-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center;}
+  .photo-viewer .pv-ask{color:#fff;font-size:13px;width:100%;text-align:center;}
+
   .toast{
     position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
     background:var(--text);color:var(--white);padding:12px 20px;border-radius:12px;
@@ -322,6 +335,12 @@
     adminKarteSearchInput: '',
     adminKarteNoteDraft: {},    /* bookingId -> 編集中の施術メモ（未保存） */
     adminKarteSavingId: null,
+    adminKartePhotos: null,     /* 表示中のお客様の写真一覧（新しい順）。null = 読み込み中 */
+    adminKartePhotosError: false,
+    adminPhotoData: {},         /* photoId -> 画像(dataURL)。'error' = 表示できない */
+    adminPhotoUploading: '',    /* アップロード中の表示（例: 1/3） */
+    adminPhotoViewer: null,     /* 拡大表示中の photoId */
+    adminPhotoDeleteAsk: false,
     toast: null,
     manual: null,               /* admin manual (phone) booking form; see newManual() */
     confirmCancelId: null       /* booking id pending cancel confirmation */
@@ -842,6 +861,149 @@
     return html;
   }
 
+  /* ---------- 顧客カルテ: 施術写真（お客様ごと・新しい順） ---------- */
+  function fmtPhotoDate(s){ var p = String(s||'').split(' ')[0].split('-'); return p.length===3 ? p[0]+'/'+(+p[1])+'/'+(+p[2]) : esc(s); }
+  function photoInner(id){
+    var d = state.adminPhotoData[id];
+    if(d==='error') return '表示できません';
+    if(d) return '<img src="'+d+'" alt="施術写真">';
+    return '読み込み中…';
+  }
+  function updatePhotoImg(id){
+    /* 画面全体を描き直さずに、その写真の枠だけ差し替える（メモ入力中でも邪魔しない） */
+    var els = root.querySelectorAll('[data-photo-id="'+id+'"]');
+    for(var i=0;i<els.length;i++) els[i].innerHTML = photoInner(id);
+  }
+  function fetchPhotoData(list){
+    var queue = list.map(function(p){ return p.id; }).filter(function(id){ return !state.adminPhotoData[id]; });
+    var running = 0;
+    function pump(){
+      while(running<3 && queue.length){
+        (function(id){
+          running++;
+          api('getPhoto', { pin: state.adminPin, id: id }).then(function(res){
+            state.adminPhotoData[id] = 'data:'+(res.mime||'image/jpeg')+';base64,'+res.data;
+          }).catch(function(){
+            state.adminPhotoData[id] = 'error';
+          }).then(function(){ running--; updatePhotoImg(id); pump(); });
+        })(queue.shift());
+      }
+    }
+    pump();
+  }
+  function loadKartePhotos(){
+    var key = normPhoneJs(state.adminKartePhone);
+    state.adminKartePhotos = null; state.adminKartePhotosError = false;
+    api('listPhotos', { pin: state.adminPin, phone: state.adminKartePhone }).then(function(res){
+      if(!state.adminKarteOpen || normPhoneJs(state.adminKartePhone)!==key) return;
+      var list = res.photos || [];
+      setState({ adminKartePhotos: list, adminKartePhotosError: false });
+      fetchPhotoData(list);
+    }).catch(function(){
+      if(!state.adminKarteOpen || normPhoneJs(state.adminKartePhone)!==key) return;
+      setState({ adminKartePhotos: [], adminKartePhotosError: true });
+    });
+  }
+  /* スマホの写真は大きいので、長い辺を1600pxまで縮小してJPEGにしてから送る */
+  function resizeImageFile(file, maxSide, quality){
+    return new Promise(function(resolve, reject){
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function(){
+        try{
+          var w = img.naturalWidth, h = img.naturalHeight;
+          if(!w || !h) throw new Error('size');
+          var scale = Math.min(1, maxSide/Math.max(w,h));
+          var cw = Math.max(1, Math.round(w*scale)), ch = Math.max(1, Math.round(h*scale));
+          var c = document.createElement('canvas'); c.width = cw; c.height = ch;
+          var ctx = c.getContext('2d');
+          ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,cw,ch);
+          ctx.drawImage(img, 0, 0, cw, ch);
+          URL.revokeObjectURL(url);
+          resolve(c.toDataURL('image/jpeg', quality));
+        }catch(e){ URL.revokeObjectURL(url); reject(e); }
+      };
+      img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('decode')); };
+      img.src = url;
+    });
+  }
+  function uploadKartePhotos(files){
+    files = files.filter(function(f){ return f && (!f.type || /^image\//.test(f.type)); });
+    if(!files.length) return;
+    if(state.adminPhotoUploading){ showToast('アップロード中です。終わってからもう一度お試しください'); return; }
+    if(files.length>10){ showToast('一度に追加できるのは10枚までです（最初の10枚を追加します）'); files = files.slice(0,10); }
+    var phone = state.adminKartePhone, key = normPhoneJs(phone);
+    var name = '';
+    for(var i=0;i<state.adminBookings.length;i++){ if(normPhoneJs(state.adminBookings[i].phone)===key){ name = state.adminBookings[i].name; } }
+    var total = files.length, done = 0, failed = 0;
+    setState({ adminPhotoUploading: 'アップロード中… 0/'+total });
+    var chain = Promise.resolve();
+    files.forEach(function(f){
+      chain = chain.then(function(){
+        return resizeImageFile(f, 1600, 0.82).then(function(dataUrl){
+          return api('uploadPhoto', { pin: state.adminPin, phone: phone, name: name, mime: 'image/jpeg', data: dataUrl.split(',')[1] }).then(function(res){
+            state.adminPhotoData[res.photo.id] = dataUrl;
+            if(normPhoneJs(state.adminKartePhone)===key && Array.isArray(state.adminKartePhotos)) state.adminKartePhotos.unshift(res.photo);
+          });
+        }).catch(function(){ failed++; }).then(function(){
+          done++;
+          setState({ adminPhotoUploading: done<total ? 'アップロード中… '+done+'/'+total : '' });
+        });
+      });
+    });
+    chain.then(function(){
+      if(failed===0) showToast(total===1 ? '写真を追加しました' : total+'枚の写真を追加しました');
+      else showToast(failed+'枚の写真を追加できませんでした。もう一度お試しください');
+    });
+  }
+  function renderKartePhotos(){
+    var html = '<div class="row-between" style="margin-top:18px;margin-bottom:10px;gap:10px;">' +
+      '<div class="section-title" style="margin:0;">施術写真（新しい順）</div>' +
+      (state.adminPhotoUploading
+        ? '<span class="faint" style="font-size:12px;">'+esc(state.adminPhotoUploading)+'</span>'
+        : '<label class="photo-add">＋ 写真を追加<input type="file" id="karte-photo-input" accept="image/*" multiple style="display:none;"></label>') +
+    '</div>';
+    var list = state.adminKartePhotos;
+    if(list===null){
+      html += '<div class="faint" style="font-size:12.5px;padding:6px 0 4px;">写真を読み込み中…</div>';
+    } else if(state.adminKartePhotosError){
+      html += '<div class="faint" style="font-size:12.5px;padding:6px 0 4px;">写真を読み込めませんでした。 <button class="btn-ghost" style="padding:0;text-decoration:underline;" data-action="karte-photos-reload">もう一度読み込む</button></div>';
+    } else if(list.length===0){
+      html += '<div class="faint" style="font-size:12.5px;padding:6px 0 4px;">まだ写真はありません。「＋ 写真を追加」から、スマホで撮った写真やアルバムの写真を登録できます。</div>';
+    } else {
+      html += '<div class="photo-grid">';
+      list.forEach(function(p){
+        html += '<button class="photo-cell" data-action="photo-open" data-id="'+esc(p.id)+'">' +
+          '<span class="photo-img" data-photo-id="'+esc(p.id)+'">'+photoInner(p.id)+'</span>' +
+          '<span class="photo-date">'+fmtPhotoDate(p.createdAt)+'</span>' +
+        '</button>';
+      });
+      html += '</div>';
+    }
+    return html;
+  }
+  function renderPhotoViewer(){
+    var id = state.adminPhotoViewer;
+    var list = state.adminKartePhotos || [];
+    var p = null;
+    for(var i=0;i<list.length;i++){ if(list[i].id===id){ p = list[i]; break; } }
+    if(!p) return '';
+    var d = state.adminPhotoData[id];
+    var html = '<div class="photo-viewer">' +
+      (d && d!=='error' ? '<img src="'+d+'" alt="施術写真">' : '<div class="pv-date">'+(d==='error'?'表示できません':'読み込み中…')+'</div>') +
+      '<div class="pv-date">'+fmtPhotoDate(p.createdAt)+' 登録</div>';
+    if(state.adminPhotoDeleteAsk){
+      html += '<div class="pv-ask">この写真を削除しますか？</div>' +
+        '<div class="pv-bar"><button class="btn btn-danger-outline" data-action="photo-delete-confirm" data-id="'+esc(id)+'">削除する</button>' +
+        '<button class="btn btn-outline" data-action="photo-delete-abort">やめる</button></div>';
+    } else {
+      html += '<div class="pv-bar"><button class="btn btn-primary" data-action="photo-close">閉じる</button>' +
+        '<button class="btn btn-outline" data-action="photo-delete-ask">削除</button></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   /* 顧客カルテ: 電話番号が一致する予約を新しい順に並べ、来店履歴と施術メモを表示する */
   function renderKarte(){
     var norm = normPhoneJs(state.adminKartePhone);
@@ -866,7 +1028,10 @@
       '</div>' +
     '</div>';
 
-    html += '<div class="section-title" style="margin-top:18px;">施術履歴（新しい順）</div>';
+    html += renderKartePhotos();
+    if(state.adminPhotoViewer) html += renderPhotoViewer();
+
+    html += '<div class="section-title" style="margin-top:22px;">施術履歴（新しい順）</div>';
 
     visits.forEach(function(b){
       var badgeClass = b.status==='cancelled' ? 'badge-cancelled' : (b.status==='completed' ? 'badge-completed' : 'badge-confirmed');
@@ -1215,19 +1380,20 @@
     }
     if(action==='admin-logout'){
       stopAdminWatch();
-      setState({ adminUnlocked:false, adminPin:'', adminBookings:[], manual:null, view:'menu', adminKarteOpen:false, adminKartePhone:'', adminKarteSearchInput:'', adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      setState({ adminUnlocked:false, adminPin:'', adminBookings:[], manual:null, view:'menu', adminKarteOpen:false, adminKartePhone:'', adminKarteSearchInput:'', adminKarteNoteDraft:{}, adminKarteSavingId:null, adminKartePhotos:null, adminPhotoData:{}, adminPhotoViewer:null, adminPhotoDeleteAsk:false, adminPhotoUploading:'' });
       return;
     }
     if(action==='admin-filter'){ setState({ adminFilter: el.getAttribute('data-filter') }); return; }
 
     /* admin: 顧客カルテ */
     if(action==='open-karte'){
-      setState({ adminKarteOpen:true, adminKartePhone: el.getAttribute('data-phone'), adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      setState({ adminKarteOpen:true, adminKartePhone: el.getAttribute('data-phone'), adminKarteNoteDraft:{}, adminKarteSavingId:null, adminPhotoViewer:null, adminPhotoDeleteAsk:false });
       window.scrollTo(0,0);
+      loadKartePhotos();
       return;
     }
     if(action==='close-karte'){
-      setState({ adminKarteOpen:false, adminKartePhone:'', adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      setState({ adminKarteOpen:false, adminKartePhone:'', adminKarteNoteDraft:{}, adminKarteSavingId:null, adminKartePhotos:null, adminPhotoViewer:null, adminPhotoDeleteAsk:false });
       return;
     }
     if(action==='karte-search'){
@@ -1238,7 +1404,8 @@
       if(!searchNorm){ showToast('電話番号を入力してください'); return; }
       var hit = state.adminBookings.some(function(b){ return normPhoneJs(b.phone)===searchNorm; });
       if(!hit){ showToast('この電話番号のご予約が見つかりませんでした'); return; }
-      setState({ adminKarteOpen:true, adminKartePhone: searchVal, adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      setState({ adminKarteOpen:true, adminKartePhone: searchVal, adminKarteNoteDraft:{}, adminKarteSavingId:null, adminPhotoViewer:null, adminPhotoDeleteAsk:false });
+      loadKartePhotos();
       return;
     }
     if(action==='karte-note-save'){
@@ -1255,6 +1422,26 @@
       }).catch(function(err){
         setState({ adminKarteSavingId: null });
         showToast(err && err.code==='bad_pin' ? 'アクセスコードが違います。ログインし直してください' : 'メモの保存に失敗しました');
+      });
+      return;
+    }
+
+    if(action==='karte-photos-reload'){ loadKartePhotos(); render(); return; }
+    if(action==='photo-open'){ setState({ adminPhotoViewer: el.getAttribute('data-id'), adminPhotoDeleteAsk:false }); return; }
+    if(action==='photo-close'){ setState({ adminPhotoViewer:null, adminPhotoDeleteAsk:false }); return; }
+    if(action==='photo-delete-ask'){ setState({ adminPhotoDeleteAsk:true }); return; }
+    if(action==='photo-delete-abort'){ setState({ adminPhotoDeleteAsk:false }); return; }
+    if(action==='photo-delete-confirm'){
+      var delId = el.getAttribute('data-id');
+      el.disabled = true;
+      api('deletePhoto', { pin: state.adminPin, id: delId }).then(function(){
+        state.adminKartePhotos = (state.adminKartePhotos||[]).filter(function(p){ return p.id!==delId; });
+        delete state.adminPhotoData[delId];
+        setState({ adminPhotoViewer:null, adminPhotoDeleteAsk:false });
+        showToast('写真を削除しました');
+      }).catch(function(){
+        setState({ adminPhotoDeleteAsk:false });
+        showToast('写真を削除できませんでした');
       });
       return;
     }
@@ -1285,6 +1472,7 @@
     var mbind = e.target.getAttribute && e.target.getAttribute('data-mbind');
     if(mbind && state.manual){ state.manual[mbind] = e.target.value; }
     if(e.target.id==='manual-date'){ loadManualDate(e.target.value); }
+    if(e.target.id==='karte-photo-input'){ uploadKartePhotos(Array.prototype.slice.call(e.target.files||[])); }
   });
   root.addEventListener('input', function(e){
     var bind = e.target.getAttribute && e.target.getAttribute('data-bind');
