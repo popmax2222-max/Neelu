@@ -273,6 +273,10 @@
   function fmtDateShort(s){ var d=parseYmd(s); return (d.getMonth()+1)+'/'+d.getDate()+'('+DOW_JP[d.getDay()]+')'; }
   function addMinutes(hhmm, mins){ var parts=hhmm.split(':').map(Number); return minToHHMM(parts[0]*60+parts[1]+mins); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function normPhoneJs(s){
+    s = String(s==null?'':s).replace(/[０-９]/g, function(c){ return String.fromCharCode(c.charCodeAt(0)-0xFEE0); });
+    return s.replace(/[^0-9]/g, '');
+  }
   function genId(){ return 'b_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
   function icon(name, size){
     size = size || 16;
@@ -313,6 +317,11 @@
     adminFilter: 'today',       /* today | week | all */
     adminLoadError: false,
     adminTimer: null,
+    adminKarteOpen: false,      /* 顧客カルテ表示中かどうか */
+    adminKartePhone: '',        /* 表示中の顧客の電話番号 */
+    adminKarteSearchInput: '',
+    adminKarteNoteDraft: {},    /* bookingId -> 編集中の施術メモ（未保存） */
+    adminKarteSavingId: null,
     toast: null,
     manual: null,               /* admin manual (phone) booking form; see newManual() */
     confirmCancelId: null       /* booking id pending cancel confirmation */
@@ -451,6 +460,11 @@
     return api('adminList', { pin: state.adminPin }).then(function(res){
       var list = (res.bookings || []).slice();
       list.sort(function(a,b){ var ka=a.date+a.time, kb=b.date+b.time; return ka<kb?-1:(ka>kb?1:0); });
+      if(state.adminKarteOpen && state.view==='admin'){
+        /* カルテ表示中は、メモ入力を邪魔しないよう画面を描き直さずにデータだけ更新 */
+        state.adminBookings = list; state.adminLoading = false; state.adminLoadError = false;
+        return;
+      }
       setState({ adminBookings:list, adminLoading:false, adminLoadError:false });
     }).catch(function(err){
       if(err.code==='bad_pin'){ stopAdminWatch(); setState({ adminUnlocked:false, adminPin:'', view:'adminLogin', adminPinError:'アクセスコードが違います' }); return; }
@@ -828,6 +842,54 @@
     return html;
   }
 
+  /* 顧客カルテ: 電話番号が一致する予約を新しい順に並べ、来店履歴と施術メモを表示する */
+  function renderKarte(){
+    var norm = normPhoneJs(state.adminKartePhone);
+    var visits = state.adminBookings.filter(function(b){ return normPhoneJs(b.phone)===norm; });
+    visits.sort(function(a,b){ var ka=a.date+a.time, kb=b.date+b.time; return ka<kb?1:(ka>kb?-1:0); }); /* 新しい順 */
+
+    var html = '<div style="margin-bottom:16px;"><button class="btn-ghost" data-action="close-karte">'+icon('back',13)+' 予約一覧に戻る</button></div>';
+
+    if(visits.length===0){
+      html += '<div class="empty-note">この電話番号のご予約が見つかりませんでした。</div>';
+      return html;
+    }
+
+    var custName = visits[0].name;
+    var visitCount = visits.filter(function(b){ return b.status!=='cancelled'; }).length;
+
+    html += '<div class="card">' +
+      '<div class="row-between" style="align-items:flex-start;flex-wrap:wrap;gap:10px;">' +
+        '<div><div style="font-weight:700;font-size:18px;font-family:\'Noto Serif JP\',serif;">'+esc(custName)+' 様</div>' +
+        '<div class="muted" style="font-size:13px;margin-top:2px;">'+esc(visits[0].phone)+'</div></div>' +
+        '<span class="badge badge-confirmed">来店・予約 '+visitCount+'回</span>' +
+      '</div>' +
+    '</div>';
+
+    html += '<div class="section-title" style="margin-top:18px;">施術履歴（新しい順）</div>';
+
+    visits.forEach(function(b){
+      var badgeClass = b.status==='cancelled' ? 'badge-cancelled' : (b.status==='completed' ? 'badge-completed' : 'badge-confirmed');
+      var badgeLabel = b.status==='cancelled' ? 'キャンセル' : (b.status==='completed' ? '来店済み' : '予約確定');
+      var noteVal = (b.id in state.adminKarteNoteDraft) ? state.adminKarteNoteDraft[b.id] : (b.staffNote||'');
+      html += '<div class="card">' +
+        '<div class="row-between" style="margin-bottom:8px;">' +
+          '<div style="font-weight:700;font-size:14px;">'+fmtDateShort(b.date)+' '+b.time+'〜'+b.endTime+'</div>' +
+          '<span class="badge '+badgeClass+'">'+badgeLabel+'</span>' +
+        '</div>' +
+        '<div class="muted" style="font-size:12.5px;margin-bottom:6px;">担当: '+esc(b.stylist)+'</div>' +
+        '<div class="muted" style="font-size:13px;padding:10px 12px;background:var(--bg-soft);border-radius:10px;">'+b.items.map(function(it){return esc(it.name);}).join('、')+' ・ '+fmtYen(b.totalPrice)+'</div>' +
+        (b.note ? '<div class="faint" style="font-size:11.5px;margin-top:8px;">備考: '+esc(b.note)+'</div>' : '') +
+        '<div class="field" style="margin-top:12px;margin-bottom:8px;"><label>施術メモ（スタッフ用・お客様には表示されません）</label>' +
+          '<textarea data-action="karte-note-input" data-id="'+esc(b.id)+'" placeholder="使用した薬剤・カラー番号、髪や地肌の状態、次回への申し送りなど">'+esc(noteVal)+'</textarea>' +
+        '</div>' +
+        '<button class="btn btn-outline" data-action="karte-note-save" data-id="'+esc(b.id)+'" '+(state.adminKarteSavingId===b.id?'disabled':'')+'>'+(state.adminKarteSavingId===b.id?'保存中…':'メモを保存')+'</button>' +
+      '</div>';
+    });
+
+    return html;
+  }
+
   function renderAdmin(){
     var all = state.adminBookings;
     var todayStr = ymd(todayDate());
@@ -849,6 +911,21 @@
         '<button class="btn btn-primary" style="padding:10px 18px;font-size:13.5px;" data-action="admin-manual-open">＋ 電話予約を登録</button>' +
         '<button class="btn-ghost" data-action="admin-logout">ログアウト</button>' +
       '</div>' +
+    '</div>';
+
+    if(state.adminKarteOpen){
+      html += renderKarte();
+      html += '</div>';
+      return html;
+    }
+
+    html += '<div class="card">' +
+      '<div class="section-title">顧客カルテを探す</div>' +
+      '<div class="row-between" style="gap:8px;">' +
+        '<input type="tel" id="karte-search-input" placeholder="電話番号で検索" value="'+esc(state.adminKarteSearchInput)+'" style="flex:1;min-width:0;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--bg-elev);font-size:16px;">' +
+        '<button class="btn btn-primary" data-action="karte-search">開く</button>' +
+      '</div>' +
+      '<p class="faint" style="font-size:11px;margin-top:8px;">予約一覧のお客様の名前をタップしても、その方のカルテが開きます。</p>' +
     '</div>';
 
     html += '<div class="stat-row">' +
@@ -879,7 +956,7 @@
         html += '<tr>' +
           '<td>'+fmtDateShort(b.date)+'</td>' +
           '<td>'+b.time+'〜'+b.endTime+'</td>' +
-          '<td>'+esc(b.name)+'<br><span class="faint" style="font-size:11px;">'+esc(b.phone)+'</span></td>' +
+          '<td><button class="btn-ghost" style="padding:0;text-align:left;font-weight:700;color:var(--accent-dark);font-size:13px;text-decoration:underline;" data-action="open-karte" data-phone="'+esc(b.phone)+'">'+esc(b.name)+'</button><br><span class="faint" style="font-size:11px;">'+esc(b.phone)+'</span></td>' +
           '<td>'+b.items.map(function(it){return esc(it.name);}).join('、')+(b.note?'<br><span class="faint" style="font-size:11px;">備考: '+esc(b.note)+'</span>':'')+'</td>' +
           '<td>'+fmtYen(b.totalPrice)+'</td>' +
           '<td><span class="badge '+badgeClass+'">'+badgeLabel+'</span></td>' +
@@ -1138,10 +1215,49 @@
     }
     if(action==='admin-logout'){
       stopAdminWatch();
-      setState({ adminUnlocked:false, adminPin:'', adminBookings:[], manual:null, view:'menu' });
+      setState({ adminUnlocked:false, adminPin:'', adminBookings:[], manual:null, view:'menu', adminKarteOpen:false, adminKartePhone:'', adminKarteSearchInput:'', adminKarteNoteDraft:{}, adminKarteSavingId:null });
       return;
     }
     if(action==='admin-filter'){ setState({ adminFilter: el.getAttribute('data-filter') }); return; }
+
+    /* admin: 顧客カルテ */
+    if(action==='open-karte'){
+      setState({ adminKarteOpen:true, adminKartePhone: el.getAttribute('data-phone'), adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      window.scrollTo(0,0);
+      return;
+    }
+    if(action==='close-karte'){
+      setState({ adminKarteOpen:false, adminKartePhone:'', adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      return;
+    }
+    if(action==='karte-search'){
+      var searchEl = document.getElementById('karte-search-input');
+      var searchVal = searchEl ? searchEl.value : state.adminKarteSearchInput;
+      state.adminKarteSearchInput = searchVal;
+      var searchNorm = normPhoneJs(searchVal);
+      if(!searchNorm){ showToast('電話番号を入力してください'); return; }
+      var hit = state.adminBookings.some(function(b){ return normPhoneJs(b.phone)===searchNorm; });
+      if(!hit){ showToast('この電話番号のご予約が見つかりませんでした'); return; }
+      setState({ adminKarteOpen:true, adminKartePhone: searchVal, adminKarteNoteDraft:{}, adminKarteSavingId:null });
+      return;
+    }
+    if(action==='karte-note-save'){
+      var noteId = el.getAttribute('data-id');
+      var target = null;
+      for(var ti=0; ti<state.adminBookings.length; ti++){ if(state.adminBookings[ti].id===noteId){ target=state.adminBookings[ti]; break; } }
+      var noteText = (noteId in state.adminKarteNoteDraft) ? state.adminKarteNoteDraft[noteId] : ((target && target.staffNote) || '');
+      setState({ adminKarteSavingId: noteId });
+      api('updateStaffNote', { pin: state.adminPin, id: noteId, staffNote: noteText }).then(function(){
+        if(target) target.staffNote = noteText;
+        delete state.adminKarteNoteDraft[noteId];
+        setState({ adminKarteSavingId: null });
+        showToast('施術メモを保存しました');
+      }).catch(function(err){
+        setState({ adminKarteSavingId: null });
+        showToast(err && err.code==='bad_pin' ? 'アクセスコードが違います。ログインし直してください' : 'メモの保存に失敗しました');
+      });
+      return;
+    }
 
     /* admin: manual (phone) booking */
     if(action==='admin-manual-open'){ state.manual = newManual(); goto('adminManual'); refreshManualBookings(); return; }
@@ -1177,6 +1293,10 @@
     if(mbind && state.manual){ state.manual[mbind] = e.target.value; }
     if(e.target.id==='lookup-phone-input'){ state.lookupPhone = e.target.value; }
     if(e.target.id==='admin-pin-input'){ state.adminPinInput = e.target.value; }
+    if(e.target.id==='karte-search-input'){ state.adminKarteSearchInput = e.target.value; }
+    if(e.target.getAttribute && e.target.getAttribute('data-action')==='karte-note-input'){
+      state.adminKarteNoteDraft[e.target.getAttribute('data-id')] = e.target.value;
+    }
   });
 
   render();
